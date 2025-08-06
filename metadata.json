@@ -1,0 +1,5 @@
+{
+  "name": "Criador de data pack",
+  "description": "Uma aplicação para ajudar a localizar nomes de um arquivo CSV para pacotes de dados de jogos. Faça o upload do seu arquivo, edite as traduções no navegador e baixe o CSV atualizado.",
+  "requestFramePermissions": []
+}
