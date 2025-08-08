@@ -1,10 +1,13 @@
+
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { CsvRow } from './types';
 import Header from './components/Header';
 import FileUpload from './components/FileUpload';
 import DataTable from './components/DataTable';
 import Pagination from './components/Pagination';
-import { DownloadIcon, SearchIcon, ClearIcon } from './components/Icons';
+import TeamFilterModal from './components/TeamFilterModal';
+import { DownloadIcon, SearchIcon, ClearIcon, FilterIcon } from './components/Icons';
+import { TEAMS } from './data/teams';
 
 // PapaParse is loaded from a CDN in index.html, we need to declare it for TypeScript
 declare const Papa: any;
@@ -13,16 +16,21 @@ const DEFAULT_ROWS_PER_PAGE = 50;
 
 const App: React.FC = () => {
   const [data, setData] = useState<CsvRow[]>([]);
-  const [viewData, setViewData] = useState<CsvRow[]>([]); // Data currently displayed in the table
   const [headers, setHeaders] = useState<string[]>([]);
   const [fileName, setFileName] = useState<string>('');
   const [error, setError] = useState<string>('');
 
-  // Search and Pagination state
+  // Search, Filter, and Pagination state
   const [searchTerm, setSearchTerm] = useState('');
   const [activeSearchTerm, setActiveSearchTerm] = useState('');
+  const [activeTeamFilter, setActiveTeamFilter] = useState<string | null>(null);
+  const [isTeamFilterModalOpen, setIsTeamFilterModalOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_ROWS_PER_PAGE);
+
+  // Derive data structures from the centralized TEAMS constant for use in the app
+  const TEAM_NAMES = useMemo(() => Object.fromEntries(TEAMS.map(team => [team.key, team.name])), []);
+  const TEAM_IDS = useMemo(() => Object.fromEntries(TEAMS.map(team => [team.key, team.ids])), []);
 
   const handleFileLoaded = useCallback((results: any, file: File) => {
     if (results.errors.length > 0) {
@@ -44,15 +52,14 @@ const App: React.FC = () => {
     setFileName(file.name);
     setHeaders(results.meta.fields || []);
     setData(nonEmptyData as CsvRow[]);
-    setViewData(nonEmptyData as CsvRow[]);
     setCurrentPage(1);
     setSearchTerm('');
     setActiveSearchTerm('');
+    setActiveTeamFilter(null);
   }, []);
 
   const handleReset = useCallback(() => {
     setData([]);
-    setViewData([]);
     setHeaders([]);
     setFileName('');
     setError('');
@@ -60,180 +67,186 @@ const App: React.FC = () => {
     setRowsPerPage(DEFAULT_ROWS_PER_PAGE);
     setSearchTerm('');
     setActiveSearchTerm('');
+    setActiveTeamFilter(null);
+    setIsTeamFilterModalOpen(false);
   }, []);
 
   const handleDataChange = useCallback((rowToUpdate: CsvRow, columnId: string, value: string) => {
     const keyColumn = headers[0];
     if (!keyColumn) return;
 
-    const updateRow = (row: CsvRow) => {
+    setData(prevData =>
+      prevData.map(row => {
         if (row[keyColumn] === rowToUpdate[keyColumn]) {
-            return { ...row, [columnId]: value };
+          return { ...row, [columnId]: value };
         }
         return row;
-    };
-    
-    // Update master data
-    setData(oldData => oldData.map(updateRow));
-    
-    // Update view data to prevent disappearing row
-    setViewData(oldViewData => oldViewData.map(updateRow));
+      })
+    );
   }, [headers]);
 
   const handleDownload = useCallback(() => {
-    if (data.length === 0) return;
-
-    const csvString = Papa.unparse(data, {
-      columns: headers,
-      header: true,
-    });
-
-    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+    const csv = Papa.unparse(data);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    const newFileName = fileName.replace('.csv', `_localized.csv`);
-    link.setAttribute('download', newFileName);
-    link.style.visibility = 'hidden';
+    const downloadFileName = fileName.endsWith('.csv') ? fileName : `${fileName}.csv`;
+    link.setAttribute('download', downloadFileName);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [data, headers, fileName]);
-  
-  const handleClearSearch = useCallback(() => {
-    setActiveSearchTerm('');
-    setSearchTerm('');
-    setViewData(data);
-    setCurrentPage(1);
-  }, [data]);
+    URL.revokeObjectURL(url);
+  }, [data, fileName]);
 
-  const handleSearchSubmit = useCallback((e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchTerm.trim()) {
-        handleClearSearch();
-        return;
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      setActiveSearchTerm(searchTerm);
+      setCurrentPage(1);
+    }
+  };
+
+  const handleClearSearch = () => {
+    setSearchTerm('');
+    setActiveSearchTerm('');
+  };
+  
+  const filteredData = useMemo(() => {
+    let filtered = data;
+
+    if (activeTeamFilter && TEAM_IDS[activeTeamFilter]) {
+      const teamIds = new Set(TEAM_IDS[activeTeamFilter]);
+      const keyColumn = headers[0];
+      if (keyColumn) {
+        filtered = filtered.filter(row => teamIds.has(String(row[keyColumn])));
+      }
+    }
+
+    if (activeSearchTerm) {
+      const lowercasedSearchTerm = activeSearchTerm.toLowerCase();
+      filtered = filtered.filter(row => 
+        Object.values(row).some(value => 
+          String(value).toLowerCase().includes(lowercasedSearchTerm)
+        )
+      );
     }
     
-    const lowercasedFilter = searchTerm.toLowerCase();
-    const results = data.filter(row =>
-      headers.some(header =>
-        String(row[header] || '').toLowerCase().includes(lowercasedFilter)
-      )
-    );
-    
-    setActiveSearchTerm(searchTerm);
-    setViewData(results);
+    return filtered;
+  }, [data, activeSearchTerm, activeTeamFilter, headers, TEAM_IDS]);
+
+  const totalRows = filteredData.length;
+  const totalPages = Math.ceil(totalRows / rowsPerPage) || 1;
+  const startIndex = (currentPage - 1) * rowsPerPage;
+  const paginatedData = useMemo(() => 
+    filteredData.slice(startIndex, startIndex + rowsPerPage), 
+    [filteredData, startIndex, rowsPerPage]
+  );
+  
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const handleSelectTeam = (teamKey: string) => {
+    setActiveTeamFilter(teamKey);
     setCurrentPage(1);
-  }, [searchTerm, data, headers, handleClearSearch]);
+    setIsTeamFilterModalOpen(false);
+  };
 
-
-  const handleRowsPerPageChange = useCallback((size: number) => {
-      setRowsPerPage(size);
-      setCurrentPage(1);
-  }, []);
-
-  // Memoize paginated data calculation
-  const { paginatedData, totalPages, startIndex } = useMemo(() => {
-    const totalRows = viewData.length;
-    const calculatedTotalPages = Math.ceil(totalRows / rowsPerPage) || 1;
-    const safeCurrentPage = Math.max(1, Math.min(currentPage, calculatedTotalPages));
-    
-    const newStartIndex = (safeCurrentPage - 1) * rowsPerPage;
-    const newPaginatedData = viewData.slice(newStartIndex, newStartIndex + rowsPerPage);
-    return { paginatedData: newPaginatedData, totalPages: calculatedTotalPages, startIndex: newStartIndex };
-  }, [viewData, currentPage, rowsPerPage]);
-
+  const handleClearTeamFilter = () => {
+    setActiveTeamFilter(null);
+    setCurrentPage(1);
+    setIsTeamFilterModalOpen(false);
+  };
+  
   return (
-    <div className="flex flex-col min-h-screen bg-gray-900 text-gray-200">
+    <div className="min-h-screen bg-gray-900 text-gray-200 antialiased flex flex-col">
       <Header />
-      <main className="flex-grow container mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="max-w-7xl mx-auto">
-          {data.length === 0 ? (
-            <FileUpload onFileLoaded={handleFileLoaded} error={error} setError={setError} />
-          ) : (
-            <div>
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
-                <div>
-                  <h2 className="text-xl font-semibold text-white">Editando: {fileName}</h2>
-                  <p className="text-sm text-gray-400">A primeira coluna é a chave e não pode ser editada.</p>
+      <main className="flex-grow container mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col">
+        {data.length === 0 ? (
+          <FileUpload onFileLoaded={handleFileLoaded} error={error} setError={setError} />
+        ) : (
+          <div className="flex-grow flex flex-col bg-gray-800 rounded-xl overflow-hidden shadow-2xl border border-gray-700">
+            <div className="p-4 sm:p-6 border-b border-gray-700">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex-grow w-full sm:w-auto">
+                    <div className="relative">
+                        <span className="absolute inset-y-0 left-0 flex items-center pl-3">
+                            <SearchIcon className="h-5 w-5 text-gray-400" />
+                        </span>
+                        <input
+                            type="text"
+                            placeholder="Pesquisar em todos os campos..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            onKeyDown={handleSearchKeyDown}
+                            className="w-full pl-10 pr-10 py-2 bg-gray-900/50 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                        />
+                        {searchTerm && (
+                            <button onClick={handleClearSearch} className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-white">
+                                <ClearIcon className="h-5 w-5" />
+                            </button>
+                        )}
+                    </div>
                 </div>
-                <div className="flex items-center gap-4 flex-shrink-0">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
                   <button
-                    onClick={handleReset}
-                    className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors duration-200"
+                    onClick={() => setIsTeamFilterModalOpen(true)}
+                    className="flex-grow sm:flex-grow-0 w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-700 text-white font-semibold rounded-lg hover:bg-gray-600 transition-colors"
                   >
-                    Começar de Novo
+                    <FilterIcon className="h-5 w-5" />
+                    Filtrar por Time
                   </button>
                   <button
                     onClick={handleDownload}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors duration-200 shadow-md"
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
                   >
                     <DownloadIcon />
-                    Baixar CSV
                   </button>
                 </div>
               </div>
-
-              <form onSubmit={handleSearchSubmit} className="flex flex-col sm:flex-row items-center gap-2 mb-6">
-                <div className="relative flex-grow w-full sm:max-w-md">
-                    <input
-                        type="search"
-                        placeholder="Pesquisar em todas as colunas..."
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full block pl-4 pr-4 py-2 bg-gray-700 text-white border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
-                        aria-label="Pesquisar dados da tabela"
-                    />
-                </div>
-                <div className="flex items-center gap-2">
-                    <button
-                        type="submit"
-                        className="inline-flex items-center gap-2 w-full sm:w-auto justify-center px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors duration-200"
-                    >
-                        <SearchIcon className="h-5 w-5" />
-                        Pesquisar
+              {activeTeamFilter && (
+                <div className="mt-4">
+                  <span className="inline-flex items-center gap-x-2 bg-blue-900/50 text-blue-300 text-sm font-medium px-3 py-1 rounded-full">
+                    Filtro ativo: {TEAM_NAMES[activeTeamFilter]}
+                    <button onClick={() => setActiveTeamFilter(null)} className="ml-1 text-blue-300 hover:text-white">
+                      <ClearIcon className="h-4 w-4" />
                     </button>
-                    {activeSearchTerm && (
-                        <button
-                            type="button"
-                            onClick={handleClearSearch}
-                            className="inline-flex items-center gap-2 w-full sm:w-auto justify-center px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors duration-200"
-                            aria-label="Limpar pesquisa"
-                        >
-                            <ClearIcon className="h-5 w-5" />
-                            Limpar
-                        </button>
-                    )}
+                  </span>
                 </div>
-              </form>
-
-              <div className="border border-gray-700 rounded-lg shadow-lg bg-gray-800 overflow-hidden">
-                  <DataTable
-                    headers={headers}
-                    data={paginatedData}
-                    onDataChange={handleDataChange}
-                  />
-                  {totalPages > 1 && (
-                      <Pagination
-                          currentPage={currentPage}
-                          totalPages={totalPages}
-                          onPageChange={setCurrentPage}
-                          rowsPerPage={rowsPerPage}
-                          onRowsPerPageChange={handleRowsPerPageChange}
-                          totalRows={viewData.length}
-                          startIndex={startIndex}
-                      />
-                  )}
-              </div>
+              )}
             </div>
-          )}
-        </div>
+            
+            <div className="flex-grow overflow-y-auto">
+               <DataTable 
+                  headers={headers} 
+                  data={paginatedData} 
+                  onDataChange={handleDataChange}
+                  noResultsMessage={activeSearchTerm || activeTeamFilter ? 'Nenhum resultado corresponde aos seus filtros.' : 'Nenhum dado para exibir.'} 
+               />
+            </div>
+            
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
+              rowsPerPage={rowsPerPage}
+              onRowsPerPageChange={(size) => { setRowsPerPage(size); setCurrentPage(1); }}
+              totalRows={totalRows}
+              startIndex={startIndex}
+            />
+          </div>
+        )}
       </main>
-      <footer className="w-full py-4">
-        <div className="text-center text-sm text-gray-500">
-          <p>Criador de data pack</p>
-        </div>
-      </footer>
+      <TeamFilterModal 
+        isOpen={isTeamFilterModalOpen}
+        onClose={() => setIsTeamFilterModalOpen(false)}
+        onSelectTeam={handleSelectTeam}
+        onClearFilter={handleClearTeamFilter}
+        activeFilter={activeTeamFilter}
+        teams={TEAM_NAMES}
+      />
     </div>
   );
 };
